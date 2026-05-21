@@ -1,4 +1,11 @@
 import { diffChars } from "diff";
+import {
+  comparePageAmounts,
+  amountsForSinglePage,
+  DEFAULT_AMOUNT_ERROR_PERCENT,
+  DEFAULT_AMOUNT_WARN_PERCENT,
+} from "./invoiceAmount";
+import type { PageAmountCompareResult } from "./invoiceAmount";
 import type { AlignedPageRow, CompareResult, CharBox, PageText } from "./types";
 import { diffPagePair } from "./diffPages";
 
@@ -202,77 +209,160 @@ function anchorForPage(page: PageText | null): string {
   return extractPageAnchorText(page.chars);
 }
 
-/**
- * 両方に宛先文字列があるときだけ判定する。
- * - 完全一致: true
- * - 不一致: false
- * - どちらか未取得: null（宛先条件は適用しない）
- */
-function recipientAnchorsExactlyMatch(
-  pageA: PageText,
-  pageB: PageText,
-): boolean | null {
-  const anchorA = normalizeAnchorPart(anchorForPage(pageA));
-  const anchorB = normalizeAnchorPart(anchorForPage(pageB));
-  if (anchorA && anchorB) return anchorA === anchorB;
-  return null;
+/** 宛先（名前・社名）同士の類似度。両方に宛先があるときだけ 0〜1、なければ 0 */
+function nameAnchorSimilarity(pageA: PageText, pageB: PageText): number {
+  const hA = normalizeAnchorPart(anchorForPage(pageA));
+  const hB = normalizeAnchorPart(anchorForPage(pageB));
+  if (!hA || !hB) return 0;
+  return pageSimilarity(hA, hB);
 }
 
-/** ペア候補: 宛先は完全一致（両方ある場合）、本文は一致率が閾値以上 */
-function isPairCandidate(
+function anchorsExactlyMatch(pageA: PageText, pageB: PageText): boolean {
+  const hA = normalizeAnchorPart(anchorForPage(pageA));
+  const hB = normalizeAnchorPart(anchorForPage(pageB));
+  return hA.length > 0 && hB.length > 0 && hA === hB;
+}
+
+interface PairCandidateScore {
+  nameSim: number;
+  exactName: boolean;
+  fullPage: number;
+}
+
+function scorePairCandidate(pageA: PageText, pageB: PageText): PairCandidateScore {
+  return {
+    nameSim: nameAnchorSimilarity(pageA, pageB),
+    exactName: anchorsExactlyMatch(pageA, pageB),
+    fullPage: pageSimilarity(pageA.text, pageB.text),
+  };
+}
+
+/** 候補に入れるか（宛先ありなら名前一致率、なければ全文一致率で判定） */
+function isPairEligible(
   pageA: PageText,
   pageB: PageText,
   threshold: number,
-): { eligible: boolean; fullPage: number } {
-  const anchorMatch = recipientAnchorsExactlyMatch(pageA, pageB);
-  if (anchorMatch === false) {
-    return { eligible: false, fullPage: 0 };
-  }
+): boolean {
+  const anchorA = normalizeAnchorPart(anchorForPage(pageA));
+  const anchorB = normalizeAnchorPart(anchorForPage(pageB));
+  const { nameSim, fullPage } = scorePairCandidate(pageA, pageB);
 
-  const fullPage = pageSimilarity(pageA.text, pageB.text);
-  return { eligible: fullPage >= threshold, fullPage };
+  if (anchorA && anchorB) return nameSim >= threshold;
+  return fullPage >= threshold;
+}
+
+function betterPairCandidate(a: PairCandidateScore, b: PairCandidateScore): boolean {
+  if (a.exactName !== b.exactName) return a.exactName > b.exactName;
+  const NAME_EPS = 1e-6;
+  if (Math.abs(a.nameSim - b.nameSim) > NAME_EPS) return a.nameSim > b.nameSim;
+  return a.fullPage > b.fullPage;
+}
+
+function amountForPage(page: PageText | null): PageAmountCompareResult {
+  if (!page) {
+    return {
+      amountsA: [],
+      amountsB: [],
+      amountPairs: [],
+      amountAlert: "none",
+    };
+  }
+  return amountsForSinglePage(page.text, "A");
+}
+
+function amountForPageB(page: PageText): PageAmountCompareResult {
+  return amountsForSinglePage(page.text, "B");
+}
+
+function compareCandidateScores(
+  a: PairCandidateScore,
+  b: PairCandidateScore,
+): number {
+  if (betterPairCandidate(a, b)) return -1;
+  if (betterPairCandidate(b, a)) return 1;
+  return 0;
 }
 
 /**
- * A の 1 ページ目から順に、まだ使っていない B のうちページとペアにする。
- * 候補条件: 両方に宛先があれば完全一致必須、かつ全文一致率が閾値以上。
- * 宛先が未取得の場合は全文一致率のみで判定。候補が複数なら全文一致率が最も高い B を選ぶ。
- * 候補がなければその A は未ペア（削除側）。残った B は追加側。
- * 表示順は A のページ順を維持し、B にのみ存在するページは末尾に並べる。
+ * A のページ順で割り当て。候補 B が既に別の A に付いていても、
+ * 今の A の方がより良い一致なら B を取り、押し出された A を別の B に再割り当てする。
+ */
+function assignPagesWithRebalance(
+  pagesA: PageText[],
+  pagesB: PageText[],
+  threshold: number,
+): Map<number, number> {
+  const aToB = new Map<number, number>();
+  const bToA = new Map<number, number>();
+
+  function clearAssignment(iA: number): void {
+    const iB = aToB.get(iA);
+    if (iB === undefined) return;
+    aToB.delete(iA);
+    bToA.delete(iB);
+  }
+
+  function setAssignment(iA: number, iB: number): void {
+    clearAssignment(iA);
+    aToB.set(iA, iB);
+    bToA.set(iB, iA);
+  }
+
+  function assignPage(iA: number): void {
+    const pageA = pagesA[iA]!;
+    const candidates: { iB: number; score: PairCandidateScore }[] = [];
+
+    for (let iB = 0; iB < pagesB.length; iB++) {
+      const pageB = pagesB[iB]!;
+      if (!isPairEligible(pageA, pageB, threshold)) continue;
+      candidates.push({ iB, score: scorePairCandidate(pageA, pageB) });
+    }
+
+    candidates.sort((x, y) => {
+      const cmp = compareCandidateScores(x.score, y.score);
+      return cmp !== 0 ? cmp : x.iB - y.iB;
+    });
+
+    for (const { iB, score } of candidates) {
+      const owner = bToA.get(iB);
+      if (owner === undefined) {
+        setAssignment(iA, iB);
+        return;
+      }
+      if (owner === iA) return;
+
+      const ownerScore = scorePairCandidate(pagesA[owner]!, pagesB[iB]!);
+      if (betterPairCandidate(score, ownerScore)) {
+        clearAssignment(owner);
+        setAssignment(iA, iB);
+        assignPage(owner);
+        return;
+      }
+    }
+  }
+
+  for (let iA = 0; iA < pagesA.length; iA++) {
+    if (!aToB.has(iA)) assignPage(iA);
+  }
+
+  return aToB;
+}
+
+/**
+ * A のページ順のまま B とペアにする（押し出し再割り当てあり）。
+ * 両方に宛先があるとき: 名前一致率が閾値以上の候補のうち、完全一致 → 名前一致率 → 全文一致率の順で最良を選ぶ。
+ * 宛先が取れないときだけ全文一致率で候補・並び替え。
  */
 export function alignAndComparePages(
   pagesA: PageText[],
   pagesB: PageText[],
   matchThreshold = DEFAULT_MATCH_THRESHOLD,
+  amountWarnPercent = DEFAULT_AMOUNT_WARN_PERCENT,
+  amountErrorPercent = DEFAULT_AMOUNT_ERROR_PERCENT,
 ): AlignedPageRow[] {
   const threshold = Math.min(1, Math.max(0, matchThreshold));
-  const usedB = new Set<number>();
-  const pairs: { iA: number; iB: number }[] = [];
-
-  for (let iA = 0; iA < pagesA.length; iA++) {
-    const pageA = pagesA[iA]!;
-    let bestI = -1;
-    let bestFullPage = -1;
-    for (let iB = 0; iB < pagesB.length; iB++) {
-      if (usedB.has(iB)) continue;
-      const pageB = pagesB[iB]!;
-      const { eligible, fullPage } = isPairCandidate(pageA, pageB, threshold);
-      if (!eligible) continue;
-      if (fullPage > bestFullPage) {
-        bestFullPage = fullPage;
-        bestI = iB;
-      }
-    }
-    if (bestI >= 0) {
-      usedB.add(bestI);
-      pairs.push({ iA, iB: bestI });
-    }
-  }
-
-  const pairByA = new Map<number, number>();
-  for (const { iA, iB } of pairs) {
-    pairByA.set(iA, iB);
-  }
+  const pairByA = assignPagesWithRebalance(pagesA, pagesB, threshold);
+  const usedB = new Set(pairByA.values());
   const unmatchedB = pagesB.map((_, i) => i).filter((i) => !usedB.has(i));
 
   const rows: AlignedPageRow[] = [];
@@ -288,6 +378,13 @@ export function alignAndComparePages(
       const diff = diffPagePair(pageA, pageB);
       const kind: AlignedPageRow["kind"] =
         diff.changeCount > 0 ? "change" : "match";
+      const amounts = comparePageAmounts(
+        pageA.text,
+        pageB.text,
+        amountWarnPercent,
+        amountErrorPercent,
+      );
+      const nameSim = nameAnchorSimilarity(pageA, pageB);
       rows.push({
         id,
         pageA: pageA.pageNumber,
@@ -295,6 +392,12 @@ export function alignAndComparePages(
         kind,
         anchorA: anchorForPage(pageA),
         anchorB: anchorForPage(pageB),
+        nameMatchPercent:
+          nameSim > 0 ? Math.round(nameSim * 100) : null,
+        amountsA: amounts.amountsA,
+        amountsB: amounts.amountsB,
+        amountPairs: amounts.amountPairs,
+        amountAlert: amounts.amountAlert,
         diff: {
           ...diff,
           pageA: pageA.pageNumber,
@@ -307,6 +410,7 @@ export function alignAndComparePages(
     }
 
     const diff = diffPagePair(pageA, null);
+    const amounts = amountForPage(pageA);
     rows.push({
       id,
       pageA: pageA.pageNumber,
@@ -314,6 +418,11 @@ export function alignAndComparePages(
       kind: "delete",
       anchorA: anchorForPage(pageA),
       anchorB: "",
+      nameMatchPercent: null,
+      amountsA: amounts.amountsA,
+      amountsB: [],
+      amountPairs: amounts.amountPairs,
+      amountAlert: "none",
       diff: {
         ...diff,
         pageA: pageA.pageNumber,
@@ -328,6 +437,7 @@ export function alignAndComparePages(
     id++;
     const pageB = pagesB[iB]!;
     const diff = diffPagePair(null, pageB);
+    const amounts = amountForPageB(pageB);
     rows.push({
       id,
       pageA: null,
@@ -335,6 +445,11 @@ export function alignAndComparePages(
       kind: "insert",
       anchorA: "",
       anchorB: anchorForPage(pageB),
+      nameMatchPercent: null,
+      amountsA: [],
+      amountsB: amounts.amountsB,
+      amountPairs: amounts.amountPairs,
+      amountAlert: "none",
       diff: {
         ...diff,
         pageA: null,
@@ -352,8 +467,16 @@ export function compareDocuments(
   pagesA: PageText[],
   pagesB: PageText[],
   matchThreshold = DEFAULT_MATCH_THRESHOLD,
+  amountWarnPercent = DEFAULT_AMOUNT_WARN_PERCENT,
+  amountErrorPercent = DEFAULT_AMOUNT_ERROR_PERCENT,
 ): CompareResult {
-  const rows = alignAndComparePages(pagesA, pagesB, matchThreshold);
+  const rows = alignAndComparePages(
+    pagesA,
+    pagesB,
+    matchThreshold,
+    amountWarnPercent,
+    amountErrorPercent,
+  );
   const totalChanges = rows.reduce((n, r) => n + r.diff.changeCount, 0);
 
   return {

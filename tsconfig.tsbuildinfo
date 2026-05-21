@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/pdfpageviewer.tsx","./src/lib/diffpages.ts","./src/lib/exportcsv.ts","./src/lib/loadpdf.ts","./src/lib/pagealign.ts","./src/lib/pdfextract.ts","./src/lib/pdfsetup.ts","./src/lib/textmeasure.ts","./src/lib/types.ts"],"version":"5.8.3"}

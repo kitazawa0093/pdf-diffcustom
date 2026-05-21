@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { RenderTask } from "pdfjs-dist";
 import { scaleRect } from "../lib/diffPages";
 import { EXTRACT_SCALE } from "../lib/pdfExtract";
-import type { HighlightRect } from "../lib/types";
+import type { AmountAlertLevel, HighlightRect } from "../lib/types";
 
 interface PdfPageViewerProps {
   doc: PDFDocumentProxy | null;
@@ -11,8 +11,12 @@ interface PdfPageViewerProps {
   scale?: number;
   highlights?: HighlightRect[];
   label: string;
-  /** 御中・様 から取った宛先文字列（デバッグ表示） */
   anchorText?: string;
+  amountText?: string;
+  /** 複数行の金額表示（amountText より優先） */
+  amountLines?: string[];
+  /** A 側: 金額ずれで左枠を色付け */
+  edgeBorder?: AmountAlertLevel;
 }
 
 const KIND_COLORS: Record<HighlightRect["kind"], string> = {
@@ -28,6 +32,9 @@ export function PdfPageViewer({
   highlights = [],
   label,
   anchorText,
+  amountText,
+  amountLines,
+  edgeBorder = "none",
 }: PdfPageViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -83,7 +90,7 @@ export function PdfPageViewer({
     <div className="page-viewer">
       <div className="page-label">{label} — p.{pageNumber}</div>
       <div
-        className="page-canvas-wrap"
+        className={`page-canvas-wrap${edgeBorder !== "none" ? ` edge-border-${edgeBorder}` : ""}`}
         style={{
           width: size.width || 280,
           height: size.height || 360,
@@ -121,9 +128,29 @@ export function PdfPageViewer({
           </svg>
         )}
       </div>
-      {anchorText !== undefined && (
-        <div className="page-anchor" title="御中・様の直前から取った文字列">
-          取込: {anchorText || "（未取得）"}
+      {(anchorText !== undefined ||
+        amountText !== undefined ||
+        (amountLines && amountLines.length > 0)) && (
+        <div className="page-meta">
+          {anchorText !== undefined && (
+            <div className="page-anchor" title="御中・様の直前から取った文字列">
+              宛先: {anchorText || "（未取得）"}
+            </div>
+          )}
+          {amountLines && amountLines.length > 0 ? (
+            <div className="page-amount-list">
+              <div className="page-amount-heading">金額</div>
+              {amountLines.map((line, i) => (
+                <div key={i} className="page-amount">
+                  {line}
+                </div>
+              ))}
+            </div>
+          ) : (
+            amountText !== undefined && (
+              <div className="page-amount">{amountText}</div>
+            )
+          )}
         </div>
       )}
     </div>
