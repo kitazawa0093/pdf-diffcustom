@@ -22,6 +22,7 @@ import {
   previewBookmarkKey,
   toggleBookmarkKey,
 } from "./lib/pageBookmarks";
+import { searchTextIncludes, normalizeForSearch } from "./lib/searchNormalize";
 import {
   compareSettingsEqual,
   cloneArrayBuffer,
@@ -36,6 +37,17 @@ const DEFAULT_MATCH_PERCENT = Math.round(DEFAULT_MATCH_THRESHOLD * 100);
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.1;
+
+/** 宛先名・ページラベルの部分一致（大小文字・半角全角を無視） */
+function rowMatchesNameSearch(
+  row: { label: string; anchorA: string; anchorB: string },
+  query: string,
+): boolean {
+  return searchTextIncludes(
+    [row.label, row.anchorA, row.anchorB].join("\n"),
+    query,
+  );
+}
 
 function normalizeCompareSettings(
   raw: Partial<CompareSettings>,
@@ -103,8 +115,13 @@ export function DiffWorkspace({
   );
   const [bookmarkKeys, setBookmarkKeys] = useState<string[]>([]);
   const [bookmarkFilterOnly, setBookmarkFilterOnly] = useState(false);
+  const [nameSearchQuery, setNameSearchQuery] = useState("");
 
   const bookmarkSet = useMemo(() => new Set(bookmarkKeys), [bookmarkKeys]);
+  const nameSearchNorm = useMemo(
+    () => normalizeForSearch(nameSearchQuery.trim()),
+    [nameSearchQuery],
+  );
 
   const compareSettings = useMemo(
     (): CompareSettings => ({
@@ -239,11 +256,25 @@ export function DiffWorkspace({
 
   const visibleRows = useMemo(() => {
     if (!compare) return [];
-    if (!bookmarkFilterOnly) return compare.rows;
-    return compare.rows.filter((row) =>
-      bookmarkSet.has(pageBookmarkKey(row.pageA, row.pageB)),
-    );
-  }, [compare, bookmarkFilterOnly, bookmarkSet]);
+    let rows = compare.rows;
+    if (bookmarkFilterOnly) {
+      rows = rows.filter((row) =>
+        bookmarkSet.has(pageBookmarkKey(row.pageA, row.pageB)),
+      );
+    }
+    if (nameSearchNorm) {
+      rows = rows.filter((row) => rowMatchesNameSearch(row, nameSearchNorm));
+    }
+    return rows;
+  }, [compare, bookmarkFilterOnly, bookmarkSet, nameSearchNorm]);
+
+  useEffect(() => {
+    if (!compare || visibleRows.length === 0) return;
+    const visible = new Set(visibleRows.map((r) => r.id));
+    if (!visible.has(navIndex)) {
+      setNavIndex(visibleRows[0]!.id);
+    }
+  }, [compare, visibleRows, navIndex]);
 
   useEffect(() => {
     if (!compare) return;
@@ -253,7 +284,7 @@ export function DiffWorkspace({
       el.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [navIndex, compare, visibleRows.length, bookmarkFilterOnly]);
+  }, [navIndex, compare, visibleRows.length, bookmarkFilterOnly, nameSearchNorm]);
 
   const toggleBookmark = useCallback(
     (key: string) => {
@@ -325,6 +356,7 @@ export function DiffWorkspace({
       setNavIndex(1);
       setBookmarkKeys([]);
       setBookmarkFilterOnly(false);
+      setNameSearchQuery("");
       await persistToDisk({
         autoCompare: false,
         bookmarks: [],
@@ -790,7 +822,11 @@ export function DiffWorkspace({
       {compare && (
         <div className="summary">
           差分 {compare.totalChanges} 文字 / ページ A:{compare.pageCountA} 枚 B:
-          {compare.pageCountB} 枚 → 表示 {compare.rows.length} 組（一致率{" "}
+          {compare.pageCountB} 枚 → 表示{" "}
+          {nameSearchNorm || bookmarkFilterOnly
+            ? `${visibleRows.length} / ${compare.rows.length}`
+            : compare.rows.length}{" "}
+          組（一致率{" "}
           {matchThresholdPercent}%: 名前一致（宛先あり時）/ 全文（宛先なし時） / 金額ずれ 黄
           {amountWarnPercent}%↑ 赤{amountErrorPercent}%↑）
         </div>
@@ -815,6 +851,29 @@ export function DiffWorkspace({
               </button>
             )}
           </div>
+          {compare && (
+            <label className="sidebar-search">
+              <span className="sidebar-search-label">名前検索</span>
+              <input
+                type="search"
+                value={nameSearchQuery}
+                onChange={(e) => setNameSearchQuery(e.target.value)}
+                placeholder="宛先名・ページラベル（部分一致・大小/半全角無視）"
+                aria-label="宛先名でページを検索"
+              />
+              {nameSearchQuery && (
+                <button
+                  type="button"
+                  className="sidebar-search-clear"
+                  onClick={() => setNameSearchQuery("")}
+                  title="検索をクリア"
+                  aria-label="検索をクリア"
+                >
+                  ×
+                </button>
+              )}
+            </label>
+          )}
           {compare ? (
             visibleRows.length > 0 ? (
             <ul className="page-list">
@@ -925,7 +984,13 @@ export function DiffWorkspace({
               })}
             </ul>
             ) : (
-              <p className="hint">しおり付きのページがありません。</p>
+              <p className="hint">
+                {nameSearchNorm && bookmarkFilterOnly
+                  ? "しおり付きかつ検索に一致するページがありません。"
+                  : nameSearchNorm
+                    ? "検索に一致するページがありません。"
+                    : "しおり付きのページがありません。"}
+              </p>
             )
           ) : hasPreview ? (
             <p className="hint">

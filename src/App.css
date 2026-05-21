@@ -272,6 +272,57 @@ body {
   border-color: #1d4ed8;
 }
 
+.sidebar-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.sidebar-search-label {
+  font-size: 0.72rem;
+  color: #64748b;
+  width: 100%;
+}
+
+.sidebar-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 28px 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+.sidebar-search input:focus {
+  outline: none;
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px rgb(37 99 235 / 15%);
+}
+
+.sidebar-search-clear {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sidebar-search-clear:hover {
+  background: #f1f5f9;
+  color: #475569;
+}
+
 .page-list-item {
   display: flex;
   gap: 4px;
