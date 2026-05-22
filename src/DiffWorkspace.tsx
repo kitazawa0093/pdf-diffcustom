@@ -38,13 +38,16 @@ const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.1;
 
-/** 宛先名・ページラベルの部分一致（大小文字・半角全角を無視） */
+/** 宛先名・ページラベル・取り込み PDF 名の部分一致（大小文字・半角全角を無視） */
 function rowMatchesNameSearch(
   row: { label: string; anchorA: string; anchorB: string },
   query: string,
+  importFileNames: { a: string; b: string },
 ): boolean {
   return searchTextIncludes(
-    [row.label, row.anchorA, row.anchorB].join("\n"),
+    [importFileNames.a, importFileNames.b, row.label, row.anchorA, row.anchorB].join(
+      "\n",
+    ),
     query,
   );
 }
@@ -73,9 +76,13 @@ function normalizeCompareSettings(
 export function DiffWorkspace({
   sessionId,
   onBack,
+  initialNameSearch,
+  initialNavIndex,
 }: {
   sessionId: string;
   onBack: () => void;
+  initialNameSearch?: string;
+  initialNavIndex?: number;
 }) {
   const inputARef = useRef<HTMLInputElement>(null);
   const inputBRef = useRef<HTMLInputElement>(null);
@@ -115,12 +122,22 @@ export function DiffWorkspace({
   );
   const [bookmarkKeys, setBookmarkKeys] = useState<string[]>([]);
   const [bookmarkFilterOnly, setBookmarkFilterOnly] = useState(false);
-  const [nameSearchQuery, setNameSearchQuery] = useState("");
+  const [nameSearchQuery, setNameSearchQuery] = useState(
+    initialNameSearch ?? "",
+  );
 
   const bookmarkSet = useMemo(() => new Set(bookmarkKeys), [bookmarkKeys]);
   const nameSearchNorm = useMemo(
     () => normalizeForSearch(nameSearchQuery.trim()),
     [nameSearchQuery],
+  );
+
+  const importFileNames = useMemo(
+    () => ({
+      a: nameA.split("（")[0]?.trim() ?? "",
+      b: nameB.split("（")[0]?.trim() ?? "",
+    }),
+    [nameA, nameB],
   );
 
   const compareSettings = useMemo(
@@ -263,10 +280,12 @@ export function DiffWorkspace({
       );
     }
     if (nameSearchNorm) {
-      rows = rows.filter((row) => rowMatchesNameSearch(row, nameSearchNorm));
+      rows = rows.filter((row) =>
+        rowMatchesNameSearch(row, nameSearchNorm, importFileNames),
+      );
     }
     return rows;
-  }, [compare, bookmarkFilterOnly, bookmarkSet, nameSearchNorm]);
+  }, [compare, bookmarkFilterOnly, bookmarkSet, nameSearchNorm, importFileNames]);
 
   useEffect(() => {
     if (!compare || visibleRows.length === 0) return;
@@ -495,11 +514,15 @@ export function DiffWorkspace({
     setNavIndex(1);
     setBookmarkKeys([]);
     setBookmarkFilterOnly(false);
+    setNameSearchQuery(initialNameSearch ?? "");
     setError(null);
 
     void (async () => {
       const session = await loadPersistedSession(sessionId);
       if (!session) return;
+
+      const targetNav =
+        initialNavIndex ?? session.navIndex ?? undefined;
 
       setLoading(true);
       try {
@@ -554,9 +577,9 @@ export function DiffWorkspace({
             pagesB: session.cachedPagesB!,
           };
           setCompare(normalizeCompareResult(session.compareResult!));
-          const idx = session.navIndex
+          const idx = targetNav
             ? Math.min(
-                Math.max(1, session.navIndex),
+                Math.max(1, targetNav),
                 session.compareResult!.rows.length,
               )
             : 1;
@@ -576,7 +599,7 @@ export function DiffWorkspace({
             session.cachedPagesA,
             session.cachedPagesB,
             s,
-            { navIndex: session.navIndex },
+            { navIndex: targetNav },
           );
         } else if (loadedA && loadedB && session.autoCompare) {
           const [pagesA, pagesB] = await Promise.all([
@@ -585,8 +608,10 @@ export function DiffWorkspace({
           ]);
           pagesCacheRef.current = { pagesA, pagesB };
           applyCompare(pagesA, pagesB, s, {
-            navIndex: session.navIndex,
+            navIndex: targetNav,
           });
+        } else if (targetNav) {
+          setNavIndex(targetNav);
         }
       } catch (e) {
         setError(
@@ -597,7 +622,7 @@ export function DiffWorkspace({
         setLoading(false);
       }
     })();
-  }, [sessionId, applyCompare]);
+  }, [sessionId, applyCompare, initialNameSearch, initialNavIndex]);
 
   useEffect(() => {
     if (!compare) return;
@@ -684,7 +709,7 @@ export function DiffWorkspace({
             <>
               <label
                 className="toolbar-threshold"
-                title="ページペア: 宛先あり時は名前一致率≧この値。より良い一致の B は既存の割り当てを押し出して取得。宛先なし時は全文一致率"
+                title="宛先が両方あるときは名前一致率≧この値でペア。片方だけ宛先があるページはペアにせず削除/追加。宛先が両方ないときだけ全文一致率"
               >
                 <span>一致率</span>
                 <input
@@ -827,7 +852,7 @@ export function DiffWorkspace({
             ? `${visibleRows.length} / ${compare.rows.length}`
             : compare.rows.length}{" "}
           組（一致率{" "}
-          {matchThresholdPercent}%: 名前一致（宛先あり時）/ 全文（宛先なし時） / 金額ずれ 黄
+          {matchThresholdPercent}%: 名前（両方宛先あり）/ 全文（両方なし） / 金額ずれ 黄
           {amountWarnPercent}%↑ 赤{amountErrorPercent}%↑）
         </div>
       )}
@@ -858,7 +883,7 @@ export function DiffWorkspace({
                 type="search"
                 value={nameSearchQuery}
                 onChange={(e) => setNameSearchQuery(e.target.value)}
-                placeholder="宛先名・ページラベル（部分一致・大小/半全角無視）"
+                placeholder="宛先・PDFファイル名（部分一致・大小/半全角無視）"
                 aria-label="宛先名でページを検索"
               />
               {nameSearchQuery && (

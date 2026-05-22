@@ -12,3 +12,18 @@ export function searchTextIncludes(haystack: string, query: string): boolean {
   if (!q) return true;
   return normalizeForSearch(haystack).includes(q);
 }
+
+/** 保存一覧の案件（PDF ファイル名・タイトル） */
+export function sessionMetaMatchesSearch(
+  meta: {
+    title: string;
+    fileNameA: string | null;
+    fileNameB: string | null;
+  },
+  query: string,
+): boolean {
+  return searchTextIncludes(
+    [meta.title, meta.fileNameA ?? "", meta.fileNameB ?? ""].join("\n"),
+    query,
+  );
+}

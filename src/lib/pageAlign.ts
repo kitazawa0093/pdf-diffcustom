@@ -248,6 +248,8 @@ function isPairEligible(
   const { nameSim, fullPage } = scorePairCandidate(pageA, pageB);
 
   if (anchorA && anchorB) return nameSim >= threshold;
+  /** 片方だけ宛先があるときはペアにしない（Aのみ→削除、Bのみ→追加） */
+  if (anchorA || anchorB) return false;
   return fullPage >= threshold;
 }
 

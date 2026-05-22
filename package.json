@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-fs": "^2.5.0",
     "diff": "^7.0.0",
     "pdfjs-dist": "^4.8.69",
     "react": "^19.1.0",
