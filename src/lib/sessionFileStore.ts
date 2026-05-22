@@ -1,10 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
+import { join } from "@tauri-apps/api/path";
 import { exists, mkdir, readDir, readFile, readTextFile, remove, writeFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import { executableDir, join } from "@tauri-apps/api/path";
 import { idbExportAllSessions } from "./sessionStoreIdb";
 import type { PersistedSessionV1, SessionMeta, StoredPdf } from "./sessionStoreTypes";
 import { metaFromSession } from "./sessionStoreTypes";
 
-const DATA_DIR = "data";
 const SESSIONS_DIR = "sessions";
 const INDEX_FILE = "index.json";
 const MIGRATION_MARKER = ".migrated-from-idb";
@@ -26,8 +26,7 @@ let initPromise: Promise<void> | null = null;
 
 export async function getDataRootPath(): Promise<string> {
   if (!dataRootCache) {
-    const exe = await executableDir();
-    dataRootCache = await join(exe, DATA_DIR);
+    dataRootCache = await invoke<string>("get_data_root");
   }
   return dataRootCache;
 }

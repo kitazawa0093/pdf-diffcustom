@@ -34,9 +34,9 @@ export async function getStorageLocationHint(): Promise<string | null> {
   if (!useFileStore()) return null;
   try {
     const root = await getDataRootPath();
-    return `${root}（実行ファイル横の data フォルダ）`;
+    return `${root}（アプリと同じフォルダ内）`;
   } catch {
-    return "実行ファイル横の data フォルダ";
+    return "アプリと同じフォルダ内の data";
   }
 }
 
