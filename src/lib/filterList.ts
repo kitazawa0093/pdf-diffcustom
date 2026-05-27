@@ -118,3 +118,39 @@ export function filterPagesByList<T extends PageText>(
 export function filterListMatchModeLabel(mode: FilterListMatchMode): string {
   return mode === "exact" ? "完全一致" : "部分一致";
 }
+
+/** 比較リスト未使用時のキャッシュ署名 */
+export const COMPARE_LIST_OFF_SIGNATURE = "off";
+
+export function buildCompareListFilterSignature(
+  compareListLoaded: boolean,
+  mode: FilterListMatchMode,
+  items: string[],
+): string {
+  if (!compareListLoaded) return COMPARE_LIST_OFF_SIGNATURE;
+  const itemsNorm = items
+    .map((it) => normalizeForSearch(it))
+    .filter((x) => x.length > 0)
+    .sort();
+  return `${mode}:${itemsNorm.join("\u0000")}`;
+}
+
+/** 比較リスト読込済みなら絞り込み、未読込なら全ページ */
+export function selectPagesForCompare(
+  pagesAAll: PageText[],
+  pagesBAll: PageText[],
+  compareListLoaded: boolean,
+  items: string[],
+  mode: FilterListMatchMode,
+): { pagesA: PageText[]; pagesB: PageText[] } {
+  if (!compareListLoaded) {
+    return { pagesA: pagesAAll, pagesB: pagesBAll };
+  }
+  if (items.length === 0) {
+    return { pagesA: [], pagesB: [] };
+  }
+  return {
+    pagesA: filterPagesByList(pagesAAll, items, mode),
+    pagesB: filterPagesByList(pagesBAll, items, mode),
+  };
+}

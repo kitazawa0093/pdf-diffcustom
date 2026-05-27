@@ -37,13 +37,14 @@ import {
   loadCompareListFromInstallDir,
 } from "./lib/compareListFile";
 import {
+  buildCompareListFilterSignature,
   COMPARE_LIST_FILENAMES,
   dedupeFilterList,
   filterListMatchModeLabel,
-  filterPagesByList,
   isExcelFile,
   parseFilterListFromExcel,
   parseFilterListText,
+  selectPagesForCompare,
   type FilterListMatchMode,
 } from "./lib/filterList";
 import { isTauri } from "@tauri-apps/api/core";
@@ -143,6 +144,8 @@ export function DiffWorkspace({
     initialNameSearch ?? "",
   );
   const [filterList, setFilterList] = useState<string[]>([]);
+  /** 比較リストを読み込んだときのみ true（未読込時は全ページ比較） */
+  const [compareListLoaded, setCompareListLoaded] = useState(false);
   const [filterListSource, setFilterListSource] = useState<string | null>(null);
   const [filterListMatchMode, setFilterListMatchMode] =
     useState<FilterListMatchMode>("partial");
@@ -153,14 +156,15 @@ export function DiffWorkspace({
     null,
   );
 
-  const filterListSignature = useMemo(() => {
-    const mode = filterListMatchMode;
-    const itemsNorm = filterList
-      .map((it) => normalizeForSearch(it))
-      .filter((x) => x.length > 0)
-      .sort();
-    return `${mode}:${itemsNorm.join("\u0000")}`;
-  }, [filterList, filterListMatchMode]);
+  const filterListSignature = useMemo(
+    () =>
+      buildCompareListFilterSignature(
+        compareListLoaded,
+        filterListMatchMode,
+        filterList,
+      ),
+    [compareListLoaded, filterList, filterListMatchMode],
+  );
 
   const bookmarkSet = useMemo(() => new Set(bookmarkKeys), [bookmarkKeys]);
   const nameSearchNorm = useMemo(
@@ -198,6 +202,7 @@ export function DiffWorkspace({
       compareFilterSignature?: string | null;
       filterList?: string[] | null;
       filterListMatchMode?: FilterListMatchMode | null;
+      compareListLoaded?: boolean | null;
     }) => {
       if (!pdfAStoreRef.current && !pdfBStoreRef.current) return;
       const compared = partial.autoCompare ?? compare !== null;
@@ -258,14 +263,20 @@ export function DiffWorkspace({
           filterList:
             partial.filterList !== undefined
               ? (partial.filterList ?? undefined)
-              : filterList.length > 0
+              : compareListLoaded
                 ? filterList
                 : undefined,
           filterListMatchMode:
             partial.filterListMatchMode !== undefined
               ? (partial.filterListMatchMode ?? undefined)
-              : filterList.length > 0
+              : compareListLoaded
                 ? filterListMatchMode
+                : undefined,
+          compareListLoaded:
+            partial.compareListLoaded !== undefined
+              ? (partial.compareListLoaded ?? undefined)
+              : compareListLoaded
+                ? true
                 : undefined,
         });
       } catch (e) {
@@ -280,6 +291,7 @@ export function DiffWorkspace({
       navIndex,
       filterList,
       filterListMatchMode,
+      compareListLoaded,
     ],
   );
 
@@ -472,18 +484,23 @@ export function DiffWorkspace({
       sourceLabel: string,
       options?: { matchMode?: FilterListMatchMode },
     ) => {
+      const mode = options?.matchMode ?? filterListMatchMode;
+      setCompareListLoaded(true);
+      setFilterList(items);
+      setFilterListSource(sourceLabel);
+      setFilterListMatchMode(mode);
       if (items.length === 0) {
         setFilterListWarning(
           `「${sourceLabel}」から有効な名前を読み取れませんでした。Excel は 1 シート目の A 列に 1 セルずつ入力してください。`,
         );
-        return;
+      } else {
+        setFilterListWarning(null);
       }
-      const mode = options?.matchMode ?? filterListMatchMode;
-      setFilterList(items);
-      setFilterListSource(sourceLabel);
-      setFilterListMatchMode(mode);
-      setFilterListWarning(null);
-      await persistToDisk({ filterList: items, filterListMatchMode: mode });
+      await persistToDisk({
+        compareListLoaded: true,
+        filterList: items,
+        filterListMatchMode: mode,
+      });
     },
     [filterListMatchMode, persistToDisk],
   );
@@ -540,20 +557,25 @@ export function DiffWorkspace({
   );
 
   const clearFilterList = useCallback(async () => {
+    setCompareListLoaded(false);
     setFilterList([]);
     setFilterListSource(null);
     setFilterListWarning(null);
-    await persistToDisk({ filterList: null, filterListMatchMode: null });
+    await persistToDisk({
+      compareListLoaded: false,
+      filterList: null,
+      filterListMatchMode: null,
+    });
   }, [persistToDisk]);
 
   const onFilterListMatchModeChange = useCallback(
     async (mode: FilterListMatchMode) => {
       setFilterListMatchMode(mode);
-      if (filterList.length > 0) {
+      if (compareListLoaded) {
         await persistToDisk({ filterListMatchMode: mode });
       }
     },
-    [filterList.length, persistToDisk],
+    [compareListLoaded, persistToDisk],
   );
 
   const applyCompare = useCallback(
@@ -621,18 +643,21 @@ export function DiffWorkspace({
 
     const cache = pagesCacheRef.current;
     if (cache) {
-      const filteredA = filterPagesByList(
+      const { pagesA: filteredA, pagesB: filteredB } = selectPagesForCompare(
         cache.pagesA,
-        filterList,
-        filterListMatchMode,
-      );
-      const filteredB = filterPagesByList(
         cache.pagesB,
+        compareListLoaded,
         filterList,
         filterListMatchMode,
       );
+      if (compareListLoaded && filterList.length === 0) {
+        setFilterListWarning(
+          "比較リストに名前がありません。Excel の A 列を確認してください。",
+        );
+        return;
+      }
       if (
-        filterList.length > 0 &&
+        compareListLoaded &&
         filteredA.length === 0 &&
         filteredB.length === 0
       ) {
@@ -671,6 +696,7 @@ export function DiffWorkspace({
     amountErrorPercent,
     applyCompare,
     compare,
+    compareListLoaded,
     filterList,
     filterListMatchMode,
     persistToDisk,
@@ -693,6 +719,7 @@ export function DiffWorkspace({
     setBookmarkFilterOnly(false);
     setNameSearchQuery(initialNameSearch ?? "");
     setFilterList([]);
+    setCompareListLoaded(false);
     setFilterListSource(null);
     setFilterListMatchMode("partial");
     setCompareListPathHint(null);
@@ -753,35 +780,48 @@ export function DiffWorkspace({
           session.filterListMatchMode === "exact" ? "exact" : "partial";
         setFilterListMatchMode(mode);
 
-        let listLoaded = false;
+        let listLoadedFromDisk = false;
+        let effectiveCompareListLoaded = false;
         let effectiveFilterItems: string[] = [];
         if (isTauri()) {
           try {
             const fromDisk = await loadCompareListFromInstallDir();
-            if (fromDisk && fromDisk.items.length > 0) {
+            if (fromDisk) {
+              listLoadedFromDisk = true;
+              effectiveCompareListLoaded = true;
+              setCompareListLoaded(true);
               setFilterList(fromDisk.items);
               setFilterListSource(fromDisk.fileName);
               effectiveFilterItems = fromDisk.items;
-              listLoaded = true;
+              if (fromDisk.items.length === 0) {
+                setFilterListWarning(
+                  `「${fromDisk.fileName}」から有効な名前を読み取れませんでした。Excel は 1 シート目の A 列に 1 セルずつ入力してください。`,
+                );
+              }
             }
           } catch {
             /* 設置フォルダのリストが無い・読めない場合はセッションへフォールバック */
           }
         }
-        if (!listLoaded && session.filterList && session.filterList.length > 0) {
-          setFilterList(session.filterList);
-          setFilterListSource("前回保存したリスト");
-          effectiveFilterItems = session.filterList;
+        if (!listLoadedFromDisk) {
+          const sessionListLoaded =
+            session.compareListLoaded === true ||
+            (session.compareListLoaded !== false &&
+              Boolean(session.filterList && session.filterList.length > 0));
+          if (sessionListLoaded && session.filterList) {
+            effectiveCompareListLoaded = true;
+            setCompareListLoaded(true);
+            setFilterList(session.filterList);
+            setFilterListSource("前回保存したリスト");
+            effectiveFilterItems = session.filterList;
+          }
         }
 
-        const effectiveFilterItemsNorm = [
-          ...new Set(
-            effectiveFilterItems
-              .map((it) => normalizeForSearch(it))
-              .filter((x) => x.length > 0),
-          ),
-        ].sort();
-        const effectiveFilterSignature = `${mode}:${effectiveFilterItemsNorm.join("\u0000")}`;
+        const effectiveFilterSignature = buildCompareListFilterSignature(
+          effectiveCompareListLoaded,
+          mode,
+          effectiveFilterItems,
+        );
 
         const cacheSettings = session.compareCacheSettings;
         const canUseSavedCompare =
@@ -826,19 +866,25 @@ export function DiffWorkspace({
             pagesB: fullPagesB,
           };
 
-          const filteredA = filterPagesByList(
-            fullPagesA,
-            effectiveFilterItems,
-            mode,
-          );
-          const filteredB = filterPagesByList(
-            fullPagesB,
-            effectiveFilterItems,
-            mode,
-          );
+          const { pagesA: filteredA, pagesB: filteredB } =
+            selectPagesForCompare(
+              fullPagesA,
+              fullPagesB,
+              effectiveCompareListLoaded,
+              effectiveFilterItems,
+              mode,
+            );
 
+          if (effectiveCompareListLoaded && effectiveFilterItems.length === 0) {
+            setFilterListWarning(
+              "比較リストに名前がありません。Excel の A 列を確認してください。",
+            );
+            setCompare(null);
+            setNavIndex(1);
+            return;
+          }
           if (
-            effectiveFilterItems.length > 0 &&
+            effectiveCompareListLoaded &&
             filteredA.length === 0 &&
             filteredB.length === 0
           ) {
@@ -863,19 +909,25 @@ export function DiffWorkspace({
 
           pagesCacheRef.current = { pagesA: pagesAAll, pagesB: pagesBAll };
 
-          const filteredA = filterPagesByList(
-            pagesAAll,
-            effectiveFilterItems,
-            mode,
-          );
-          const filteredB = filterPagesByList(
-            pagesBAll,
-            effectiveFilterItems,
-            mode,
-          );
+          const { pagesA: filteredA, pagesB: filteredB } =
+            selectPagesForCompare(
+              pagesAAll,
+              pagesBAll,
+              effectiveCompareListLoaded,
+              effectiveFilterItems,
+              mode,
+            );
 
+          if (effectiveCompareListLoaded && effectiveFilterItems.length === 0) {
+            setFilterListWarning(
+              "比較リストに名前がありません。Excel の A 列を確認してください。",
+            );
+            setCompare(null);
+            setNavIndex(1);
+            return;
+          }
           if (
-            effectiveFilterItems.length > 0 &&
+            effectiveCompareListLoaded &&
             filteredA.length === 0 &&
             filteredB.length === 0
           ) {
@@ -943,17 +995,25 @@ export function DiffWorkspace({
         extractAllPages(docA),
         extractAllPages(docB),
       ]);
-      const filteredA = filterPagesByList(
+      const { pagesA: filteredA, pagesB: filteredB } = selectPagesForCompare(
         pagesAAll,
-        filterList,
-        filterListMatchMode,
-      );
-      const filteredB = filterPagesByList(
         pagesBAll,
+        compareListLoaded,
         filterList,
         filterListMatchMode,
       );
-      if (filterList.length > 0 && filteredA.length === 0 && filteredB.length === 0) {
+      if (compareListLoaded && filterList.length === 0) {
+        setFilterListWarning(
+          "比較リストに名前がありません。Excel の A 列を確認してください。",
+        );
+        setLoading(false);
+        return;
+      }
+      if (
+        compareListLoaded &&
+        filteredA.length === 0 &&
+        filteredB.length === 0
+      ) {
         setFilterListWarning(
           "比較リストに一致するページがありませんでした。リストを確認してください。",
         );
@@ -962,13 +1022,24 @@ export function DiffWorkspace({
       }
       // キャッシュはフィルタ前（全ページ）を保持し、Excel 差し替えでも再計算できるようにする
       pagesCacheRef.current = { pagesA: pagesAAll, pagesB: pagesBAll };
-      applyCompare(filteredA, filteredB, compareSettings);
+      applyCompare(filteredA, filteredB, compareSettings, {
+        filterSignature: filterListSignature,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [docA, docB, compareSettings, applyCompare, filterList, filterListMatchMode]);
+  }, [
+    docA,
+    docB,
+    compareSettings,
+    applyCompare,
+    compareListLoaded,
+    filterList,
+    filterListMatchMode,
+    filterListSignature,
+  ]);
 
   return (
     <div className="app">
@@ -1051,10 +1122,10 @@ export function DiffWorkspace({
               <option value="exact">完全一致</option>
             </select>
           </label>
-          {filterList.length > 0 && (
+          {compareListLoaded && (
             <span
               className="filter-list-badge"
-              title={`${filterListSource ?? "リスト"}（${filterListMatchModeLabel(filterListMatchMode)}）で PDF A/B のページを絞り込みます\n\n${filterList.join("\n")}`}
+              title={`${filterListSource ?? "リスト"}（${filterListMatchModeLabel(filterListMatchMode)}）で PDF A/B のページを絞り込みます\n\n${filterList.length > 0 ? filterList.join("\n") : "（名前なし）"}`}
             >
               リスト {filterList.length}件・
               {filterListMatchModeLabel(filterListMatchMode)}

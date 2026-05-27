@@ -29,6 +29,8 @@ export interface PersistedSessionV1 {
   filterList?: string[];
   /** 比較リストの一致方法（未設定時は部分一致） */
   filterListMatchMode?: "partial" | "exact";
+  /** 比較リストを読み込んで絞り込みを有効にしている */
+  compareListLoaded?: boolean;
 }
 
 export interface SessionMeta {
