@@ -31,6 +31,22 @@ import {
   savePersistedSession,
   type StoredPdf,
 } from "./lib/sessionStore";
+import {
+  compareListHintPath,
+  getInstallDirPath,
+  loadCompareListFromInstallDir,
+} from "./lib/compareListFile";
+import {
+  COMPARE_LIST_FILENAMES,
+  dedupeFilterList,
+  filterListMatchModeLabel,
+  filterPagesByList,
+  isExcelFile,
+  parseFilterListFromExcel,
+  parseFilterListText,
+  type FilterListMatchMode,
+} from "./lib/filterList";
+import { isTauri } from "@tauri-apps/api/core";
 
 const DEFAULT_ZOOM = 1.2;
 const DEFAULT_MATCH_PERCENT = Math.round(DEFAULT_MATCH_THRESHOLD * 100);
@@ -86,6 +102,7 @@ export function DiffWorkspace({
 }) {
   const inputARef = useRef<HTMLInputElement>(null);
   const inputBRef = useRef<HTMLInputElement>(null);
+  const inputListRef = useRef<HTMLInputElement>(null);
   const pagesCacheRef = useRef<{ pagesA: PageText[]; pagesB: PageText[] } | null>(
     null,
   );
@@ -125,6 +142,16 @@ export function DiffWorkspace({
   const [nameSearchQuery, setNameSearchQuery] = useState(
     initialNameSearch ?? "",
   );
+  const [filterList, setFilterList] = useState<string[]>([]);
+  const [filterListSource, setFilterListSource] = useState<string | null>(null);
+  const [filterListMatchMode, setFilterListMatchMode] =
+    useState<FilterListMatchMode>("partial");
+  const [compareListPathHint, setCompareListPathHint] = useState<string | null>(
+    null,
+  );
+  const [filterListWarning, setFilterListWarning] = useState<string | null>(
+    null,
+  );
 
   const bookmarkSet = useMemo(() => new Set(bookmarkKeys), [bookmarkKeys]);
   const nameSearchNorm = useMemo(
@@ -159,6 +186,8 @@ export function DiffWorkspace({
       cachedPagesA?: PageText[] | null;
       cachedPagesB?: PageText[] | null;
       compareCacheSettings?: CompareSettings | null;
+      filterList?: string[] | null;
+      filterListMatchMode?: FilterListMatchMode | null;
     }) => {
       if (!pdfAStoreRef.current && !pdfBStoreRef.current) return;
       const compared = partial.autoCompare ?? compare !== null;
@@ -212,12 +241,32 @@ export function DiffWorkspace({
               : savedCompare && savedPagesA && savedPagesB
                 ? settings
                 : undefined,
+          filterList:
+            partial.filterList !== undefined
+              ? (partial.filterList ?? undefined)
+              : filterList.length > 0
+                ? filterList
+                : undefined,
+          filterListMatchMode:
+            partial.filterListMatchMode !== undefined
+              ? (partial.filterListMatchMode ?? undefined)
+              : filterList.length > 0
+                ? filterListMatchMode
+                : undefined,
         });
       } catch (e) {
         console.warn("セッション保存に失敗", e);
       }
     },
-    [compareSettings, bookmarkKeys, sessionId, compare, navIndex],
+    [
+      compareSettings,
+      bookmarkKeys,
+      sessionId,
+      compare,
+      navIndex,
+      filterList,
+      filterListMatchMode,
+    ],
   );
 
   const flushSession = useCallback(async () => {
@@ -403,6 +452,96 @@ export function DiffWorkspace({
     [loadFile],
   );
 
+  const applyFilterListItems = useCallback(
+    async (
+      items: string[],
+      sourceLabel: string,
+      options?: { matchMode?: FilterListMatchMode },
+    ) => {
+      if (items.length === 0) {
+        setFilterListWarning(
+          `「${sourceLabel}」から有効な名前を読み取れませんでした。Excel は 1 シート目の A 列に 1 セルずつ入力してください。`,
+        );
+        return;
+      }
+      const mode = options?.matchMode ?? filterListMatchMode;
+      setFilterList(items);
+      setFilterListSource(sourceLabel);
+      setFilterListMatchMode(mode);
+      setFilterListWarning(null);
+      await persistToDisk({ filterList: items, filterListMatchMode: mode });
+    },
+    [filterListMatchMode, persistToDisk],
+  );
+
+  const reloadCompareListFromInstallDir = useCallback(async () => {
+    setError(null);
+    if (!isTauri()) {
+      setFilterListWarning(
+        "比較リストの自動読み込みはデスクトップ版（Tauri）でのみ利用できます。",
+      );
+      return;
+    }
+    try {
+      const loaded = await loadCompareListFromInstallDir();
+      if (!loaded) {
+        setFilterListWarning(
+          `アプリと同じフォルダに ${COMPARE_LIST_FILENAMES.join(" または ")} を置いてください。`,
+        );
+        return;
+      }
+      await applyFilterListItems(loaded.items, loaded.fileName);
+    } catch (e) {
+      setError(
+        `リストの読み込みに失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }, [applyFilterListItems]);
+
+  const loadFilterListFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      setFilterListWarning(null);
+      try {
+        const rawItems = isExcelFile(file)
+          ? await parseFilterListFromExcel(file)
+          : parseFilterListText(await file.text());
+        await applyFilterListItems(dedupeFilterList(rawItems), file.name);
+      } catch (e) {
+        setError(
+          `リストの読み込みに失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    },
+    [applyFilterListItems],
+  );
+
+  const onFilterListChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) await loadFilterListFile(file);
+      e.target.value = "";
+    },
+    [loadFilterListFile],
+  );
+
+  const clearFilterList = useCallback(async () => {
+    setFilterList([]);
+    setFilterListSource(null);
+    setFilterListWarning(null);
+    await persistToDisk({ filterList: null, filterListMatchMode: null });
+  }, [persistToDisk]);
+
+  const onFilterListMatchModeChange = useCallback(
+    async (mode: FilterListMatchMode) => {
+      setFilterListMatchMode(mode);
+      if (filterList.length > 0) {
+        await persistToDisk({ filterListMatchMode: mode });
+      }
+    },
+    [filterList.length, persistToDisk],
+  );
+
   const applyCompare = useCallback(
     (
       pagesA: PageText[],
@@ -515,9 +654,19 @@ export function DiffWorkspace({
     setBookmarkKeys([]);
     setBookmarkFilterOnly(false);
     setNameSearchQuery(initialNameSearch ?? "");
+    setFilterList([]);
+    setFilterListSource(null);
+    setFilterListMatchMode("partial");
+    setCompareListPathHint(null);
+    setFilterListWarning(null);
     setError(null);
 
     void (async () => {
+      if (isTauri()) {
+        const installDir = await getInstallDirPath();
+        setCompareListPathHint(compareListHintPath(installDir));
+      }
+
       const session = await loadPersistedSession(sessionId);
       if (!session) return;
 
@@ -562,6 +711,27 @@ export function DiffWorkspace({
         setAmountErrorPercent(s.amountErrorPercent);
         setAmountErrorInput(String(s.amountErrorPercent));
         setBookmarkKeys(session.bookmarks ?? []);
+        const mode: FilterListMatchMode =
+          session.filterListMatchMode === "exact" ? "exact" : "partial";
+        setFilterListMatchMode(mode);
+
+        let listLoaded = false;
+        if (isTauri()) {
+          try {
+            const fromDisk = await loadCompareListFromInstallDir();
+            if (fromDisk && fromDisk.items.length > 0) {
+              setFilterList(fromDisk.items);
+              setFilterListSource(fromDisk.fileName);
+              listLoaded = true;
+            }
+          } catch {
+            /* 設置フォルダのリストが無い・読めない場合はセッションへフォールバック */
+          }
+        }
+        if (!listLoaded && session.filterList && session.filterList.length > 0) {
+          setFilterList(session.filterList);
+          setFilterListSource("前回保存したリスト");
+        }
 
         const cacheSettings = session.compareCacheSettings;
         const canUseSavedCompare =
@@ -655,19 +825,37 @@ export function DiffWorkspace({
     }
     setLoading(true);
     setError(null);
+    setFilterListWarning(null);
     try {
       const [pagesA, pagesB] = await Promise.all([
         extractAllPages(docA),
         extractAllPages(docB),
       ]);
-      pagesCacheRef.current = { pagesA, pagesB };
-      applyCompare(pagesA, pagesB, compareSettings);
+      const filteredA = filterPagesByList(
+        pagesA,
+        filterList,
+        filterListMatchMode,
+      );
+      const filteredB = filterPagesByList(
+        pagesB,
+        filterList,
+        filterListMatchMode,
+      );
+      if (filterList.length > 0 && filteredA.length === 0 && filteredB.length === 0) {
+        setFilterListWarning(
+          "比較リストに一致するページがありませんでした。リストを確認してください。",
+        );
+        setLoading(false);
+        return;
+      }
+      pagesCacheRef.current = { pagesA: filteredA, pagesB: filteredB };
+      applyCompare(filteredA, filteredB, compareSettings);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [docA, docB, compareSettings, applyCompare]);
+  }, [docA, docB, compareSettings, applyCompare, filterList, filterListMatchMode]);
 
   return (
     <div className="app">
@@ -691,6 +879,13 @@ export function DiffWorkspace({
             hidden
             onChange={onFileChange("B")}
           />
+          <input
+            ref={inputListRef}
+            type="file"
+            accept=".txt,.csv,.xlsx,.xls,.xlsm,.xlsb,.ods,text/plain,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            hidden
+            onChange={onFilterListChange}
+          />
           <button
             type="button"
             onClick={() => inputARef.current?.click()}
@@ -705,6 +900,62 @@ export function DiffWorkspace({
           >
             PDF B
           </button>
+          <button
+            type="button"
+            onClick={() => void reloadCompareListFromInstallDir()}
+            disabled={loading}
+            title={
+              compareListPathHint
+                ? `アプリと同じフォルダの ${COMPARE_LIST_FILENAMES[0]} などを読み込み（A 列）`
+                : "比較リスト Excel を再読み込み"
+            }
+          >
+            リスト読込
+          </button>
+          <button
+            type="button"
+            onClick={() => inputListRef.current?.click()}
+            disabled={loading}
+            title="別のファイルから比較リストを選ぶ"
+          >
+            リスト選択…
+          </button>
+          <label
+            className="toolbar-filter-mode"
+            title="比較リストと PDF 宛先名の一致方法"
+          >
+            <span>リスト一致</span>
+            <select
+              value={filterListMatchMode}
+              onChange={(e) =>
+                void onFilterListMatchModeChange(
+                  e.target.value as FilterListMatchMode,
+                )
+              }
+              aria-label="比較リストの一致方法"
+            >
+              <option value="partial">部分一致</option>
+              <option value="exact">完全一致</option>
+            </select>
+          </label>
+          {filterList.length > 0 && (
+            <span
+              className="filter-list-badge"
+              title={`${filterListSource ?? "リスト"}（${filterListMatchModeLabel(filterListMatchMode)}）で PDF A/B のページを絞り込みます\n\n${filterList.join("\n")}`}
+            >
+              リスト {filterList.length}件・
+              {filterListMatchModeLabel(filterListMatchMode)}
+              <button
+                type="button"
+                className="filter-list-clear"
+                onClick={() => void clearFilterList()}
+                title="比較リストを解除"
+                aria-label="比較リストを解除"
+              >
+                ×
+              </button>
+            </span>
+          )}
           {docA && docB && (
             <>
               <label
@@ -843,6 +1094,15 @@ export function DiffWorkspace({
 
       {loading && <div className="loading-banner">処理中…</div>}
       {error && <div className="error-banner">{error}</div>}
+      {filterListWarning && (
+        <div className="warning-banner">{filterListWarning}</div>
+      )}
+      {isTauri() && compareListPathHint && filterList.length === 0 && (
+        <div className="restore-banner">
+          比較リスト: <code>{compareListPathHint}</code>（1 シート目・A 列）を置くと「リスト読込」で
+          絞り込みできます。
+        </div>
+      )}
 
       {compare && (
         <div className="summary">
