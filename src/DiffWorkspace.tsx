@@ -153,6 +153,15 @@ export function DiffWorkspace({
     null,
   );
 
+  const filterListSignature = useMemo(() => {
+    const mode = filterListMatchMode;
+    const itemsNorm = filterList
+      .map((it) => normalizeForSearch(it))
+      .filter((x) => x.length > 0)
+      .sort();
+    return `${mode}:${itemsNorm.join("\u0000")}`;
+  }, [filterList, filterListMatchMode]);
+
   const bookmarkSet = useMemo(() => new Set(bookmarkKeys), [bookmarkKeys]);
   const nameSearchNorm = useMemo(
     () => normalizeForSearch(nameSearchQuery.trim()),
@@ -186,6 +195,7 @@ export function DiffWorkspace({
       cachedPagesA?: PageText[] | null;
       cachedPagesB?: PageText[] | null;
       compareCacheSettings?: CompareSettings | null;
+      compareFilterSignature?: string | null;
       filterList?: string[] | null;
       filterListMatchMode?: FilterListMatchMode | null;
     }) => {
@@ -241,6 +251,10 @@ export function DiffWorkspace({
               : savedCompare && savedPagesA && savedPagesB
                 ? settings
                 : undefined,
+          compareFilterSignature:
+            partial.compareFilterSignature !== undefined
+              ? (partial.compareFilterSignature ?? undefined)
+              : undefined,
           filterList:
             partial.filterList !== undefined
               ? (partial.filterList ?? undefined)
@@ -547,7 +561,7 @@ export function DiffWorkspace({
       pagesA: PageText[],
       pagesB: PageText[],
       raw: Partial<CompareSettings>,
-      options?: { navIndex?: number },
+      options?: { navIndex?: number; filterSignature?: string | null },
     ) => {
       const s = normalizeCompareSettings(raw);
       setMatchThresholdPercent(s.matchPercent);
@@ -568,18 +582,19 @@ export function DiffWorkspace({
         ? Math.min(Math.max(1, options.navIndex), result.rows.length)
         : 1;
       setNavIndex(idx);
-      pagesCacheRef.current = { pagesA, pagesB };
       void persistToDisk({
         settings: s,
         autoCompare: true,
         navIndex: idx,
         compareResult: result,
-        cachedPagesA: pagesA,
-        cachedPagesB: pagesB,
         compareCacheSettings: s,
+        compareFilterSignature:
+          options?.filterSignature !== undefined
+            ? options.filterSignature
+            : filterListSignature,
       });
     },
-    [persistToDisk],
+    [persistToDisk, filterListSignature],
   );
 
   const commitCompareSettings = useCallback(() => {
@@ -606,7 +621,28 @@ export function DiffWorkspace({
 
     const cache = pagesCacheRef.current;
     if (cache) {
-      applyCompare(cache.pagesA, cache.pagesB, {
+      const filteredA = filterPagesByList(
+        cache.pagesA,
+        filterList,
+        filterListMatchMode,
+      );
+      const filteredB = filterPagesByList(
+        cache.pagesB,
+        filterList,
+        filterListMatchMode,
+      );
+      if (
+        filterList.length > 0 &&
+        filteredA.length === 0 &&
+        filteredB.length === 0
+      ) {
+        setFilterListWarning(
+          "比較リストに一致するページがありませんでした。リストを確認してください。",
+        );
+        return;
+      }
+      setFilterListWarning(null);
+      applyCompare(filteredA, filteredB, {
         matchPercent: parsedMatch,
         amountWarnPercent: parsedWarn,
         amountErrorPercent: parsedError,
@@ -635,6 +671,8 @@ export function DiffWorkspace({
     amountErrorPercent,
     applyCompare,
     compare,
+    filterList,
+    filterListMatchMode,
     persistToDisk,
   ]);
 
@@ -716,12 +754,14 @@ export function DiffWorkspace({
         setFilterListMatchMode(mode);
 
         let listLoaded = false;
+        let effectiveFilterItems: string[] = [];
         if (isTauri()) {
           try {
             const fromDisk = await loadCompareListFromInstallDir();
             if (fromDisk && fromDisk.items.length > 0) {
               setFilterList(fromDisk.items);
               setFilterListSource(fromDisk.fileName);
+              effectiveFilterItems = fromDisk.items;
               listLoaded = true;
             }
           } catch {
@@ -731,7 +771,17 @@ export function DiffWorkspace({
         if (!listLoaded && session.filterList && session.filterList.length > 0) {
           setFilterList(session.filterList);
           setFilterListSource("前回保存したリスト");
+          effectiveFilterItems = session.filterList;
         }
+
+        const effectiveFilterItemsNorm = [
+          ...new Set(
+            effectiveFilterItems
+              .map((it) => normalizeForSearch(it))
+              .filter((x) => x.length > 0),
+          ),
+        ].sort();
+        const effectiveFilterSignature = `${mode}:${effectiveFilterItemsNorm.join("\u0000")}`;
 
         const cacheSettings = session.compareCacheSettings;
         const canUseSavedCompare =
@@ -739,7 +789,8 @@ export function DiffWorkspace({
           session.cachedPagesA &&
           session.cachedPagesB &&
           cacheSettings &&
-          compareSettingsEqual(s, cacheSettings);
+          compareSettingsEqual(s, cacheSettings) &&
+          session.compareFilterSignature === effectiveFilterSignature;
 
         if (canUseSavedCompare) {
           pagesCacheRef.current = {
@@ -761,24 +812,85 @@ export function DiffWorkspace({
           session.cachedPagesA &&
           session.cachedPagesB
         ) {
+          const needReExtract =
+            session.compareFilterSignature !== effectiveFilterSignature;
+          const [fullPagesA, fullPagesB] = needReExtract
+            ? await Promise.all([
+                extractAllPages(loadedA),
+                extractAllPages(loadedB),
+              ])
+            : [session.cachedPagesA, session.cachedPagesB];
+
           pagesCacheRef.current = {
-            pagesA: session.cachedPagesA,
-            pagesB: session.cachedPagesB,
+            pagesA: fullPagesA,
+            pagesB: fullPagesB,
           };
-          applyCompare(
-            session.cachedPagesA,
-            session.cachedPagesB,
-            s,
-            { navIndex: targetNav },
+
+          const filteredA = filterPagesByList(
+            fullPagesA,
+            effectiveFilterItems,
+            mode,
           );
+          const filteredB = filterPagesByList(
+            fullPagesB,
+            effectiveFilterItems,
+            mode,
+          );
+
+          if (
+            effectiveFilterItems.length > 0 &&
+            filteredA.length === 0 &&
+            filteredB.length === 0
+          ) {
+            setFilterListWarning(
+              "比較リストに一致するページがありませんでした。リストを確認してください。",
+            );
+            setCompare(null);
+            setNavIndex(1);
+            return;
+          }
+
+          setFilterListWarning(null);
+          applyCompare(filteredA, filteredB, s, {
+            navIndex: targetNav,
+            filterSignature: effectiveFilterSignature,
+          });
         } else if (loadedA && loadedB && session.autoCompare) {
-          const [pagesA, pagesB] = await Promise.all([
+          const [pagesAAll, pagesBAll] = await Promise.all([
             extractAllPages(loadedA),
             extractAllPages(loadedB),
           ]);
-          pagesCacheRef.current = { pagesA, pagesB };
-          applyCompare(pagesA, pagesB, s, {
+
+          pagesCacheRef.current = { pagesA: pagesAAll, pagesB: pagesBAll };
+
+          const filteredA = filterPagesByList(
+            pagesAAll,
+            effectiveFilterItems,
+            mode,
+          );
+          const filteredB = filterPagesByList(
+            pagesBAll,
+            effectiveFilterItems,
+            mode,
+          );
+
+          if (
+            effectiveFilterItems.length > 0 &&
+            filteredA.length === 0 &&
+            filteredB.length === 0
+          ) {
+            setFilterListWarning(
+              "比較リストに一致するページがありませんでした。リストを確認してください。",
+            );
+            setCompare(null);
+            setNavIndex(1);
+            return;
+          }
+
+          setFilterListWarning(null);
+          applyCompare(filteredA, filteredB, s, {
             navIndex: targetNav,
+            filterSignature: effectiveFilterSignature,
           });
         } else if (targetNav) {
           setNavIndex(targetNav);
@@ -827,17 +939,17 @@ export function DiffWorkspace({
     setError(null);
     setFilterListWarning(null);
     try {
-      const [pagesA, pagesB] = await Promise.all([
+      const [pagesAAll, pagesBAll] = await Promise.all([
         extractAllPages(docA),
         extractAllPages(docB),
       ]);
       const filteredA = filterPagesByList(
-        pagesA,
+        pagesAAll,
         filterList,
         filterListMatchMode,
       );
       const filteredB = filterPagesByList(
-        pagesB,
+        pagesBAll,
         filterList,
         filterListMatchMode,
       );
@@ -848,7 +960,8 @@ export function DiffWorkspace({
         setLoading(false);
         return;
       }
-      pagesCacheRef.current = { pagesA: filteredA, pagesB: filteredB };
+      // キャッシュはフィルタ前（全ページ）を保持し、Excel 差し替えでも再計算できるようにする
+      pagesCacheRef.current = { pagesA: pagesAAll, pagesB: pagesBAll };
       applyCompare(filteredA, filteredB, compareSettings);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

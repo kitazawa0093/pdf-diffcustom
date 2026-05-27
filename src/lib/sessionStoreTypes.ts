@@ -23,6 +23,8 @@ export interface PersistedSessionV1 {
   compareResult?: CompareResult;
   /** compareResult / cachedPages が有効なときの設定 */
   compareCacheSettings?: CompareSettings;
+  /** compareResult を作ったときの filterList（A列一致）のシグネチャ */
+  compareFilterSignature?: string | null;
   /** 比較前に PDF A/B のページを絞り込む名前リスト */
   filterList?: string[];
   /** 比較リストの一致方法（未設定時は部分一致） */
